@@ -1,0 +1,181 @@
+name: build-installer
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.22.2
+
+      - name: Verify clean sources and version
+        run: |
+          python tools/verify_clean_sources.py
+          python tools/verify_version.py
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}' -replace '^v', '' } else { '0.0' }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Set version
+        run: python tools/set_version.py ${{ steps.ver.outputs.version }}
+
+      - name: Build executable
+        run: python -m PyInstaller --noconfirm --clean --log-level WARN Facet.spec
+
+      - name: Scrub build metadata
+        shell: pwsh
+        run: |
+          python tools/scrub_metadata.py dist/Facet
+          if ($LASTEXITCODE -ne 0) { throw "scrub_metadata failed on dist/Facet" }
+          New-Item -ItemType Directory -Path installer -Force | Out-Null
+          Copy-Item dist/Facet-standalone.exe installer/Facet.exe
+          python tools/scrub_metadata.py --file installer/Facet.exe
+          if ($LASTEXITCODE -ne 0) { throw "scrub_metadata failed on installer/Facet.exe" }
+
+      - name: Smoke selftest
+        shell: pwsh
+        run: |
+          foreach ($exe in @("dist\Facet\Facet.exe", "installer\Facet.exe")) {
+            $log = "selftest.log"
+            Remove-Item $log -Force -ErrorAction SilentlyContinue
+            $p = Start-Process -FilePath $exe -ArgumentList "--selftest","$log" -PassThru -Wait
+            if ($p.ExitCode -ne 0) { throw "$exe selftest exited with code $($p.ExitCode)" }
+            if (-not (Test-Path $log)) { throw "$exe missing $log" }
+            $t = (Get-Content $log -Raw).Trim()
+            Write-Output "$exe => $t"
+            if ($t -notmatch 'SELFTEST_OK') { throw "$exe selftest failed: $t" }
+            Remove-Item $log -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Smoke GUI startup
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\Facet\Facet.exe" -PassThru
+          Start-Sleep -Seconds 20
+          $p.Refresh()
+          if ($p.HasExited) { throw "app exited early with code $($p.ExitCode)" }
+          $title = $p.MainWindowTitle
+          Stop-Process -Id $p.Id -Force
+          Write-Output "title='$title'"
+          if ($title -and ($title -notlike 'Facet*')) { throw "unexpected window title: '$title'" }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Find-ISCC {
+            foreach ($c in @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+              "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+              "$env:RUNNER_TEMP\InnoSetup6\ISCC.exe")) {
+              if (Test-Path $c) { return $c }
+            }
+            return $null
+          }
+          $iscc = Find-ISCC
+          if (-not $iscc) {
+            $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+            $sha = "9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732"
+            $exe = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3.exe"
+            $dir = Join-Path $env:RUNNER_TEMP "InnoSetup6"
+            Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
+            $got = (Get-FileHash $exe -Algorithm SHA256).Hash
+            if ($got -ne $sha) { throw "Inno Setup SHA256 mismatch: $got" }
+            $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList `
+              "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-","/NOICONS","/CURRENTUSER","/DIR=$dir"
+            if ($p.ExitCode -ne 0) { throw "Inno Setup install exited with code $($p.ExitCode)" }
+            $iscc = Find-ISCC
+          }
+          if (-not $iscc) {
+            throw "ISCC.exe not found after Inno Setup install"
+          }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" Facet.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed (code $LASTEXITCODE)" }
+
+      - name: Scrub installer metadata
+        run: python tools/scrub_metadata.py --file installer/Facet-setup.exe
+
+      - name: Verify clean binaries and timestamps
+        shell: pwsh
+        run: |
+          python tools/scrub_metadata.py --verify dist/Facet
+          if ($LASTEXITCODE -ne 0) { throw "dist still contains build metadata" }
+          python tools/scrub_metadata.py --verify --file installer/Facet-setup.exe
+          if ($LASTEXITCODE -ne 0) { throw "installer still contains PE timestamp" }
+          python tools/verify_clean_binaries.py
+          if ($LASTEXITCODE -ne 0) { throw "verify_clean_binaries failed" }
+
+      - name: Verify installer size
+        shell: pwsh
+        run: |
+          $f = "installer\Facet-setup.exe"
+          if (-not (Test-Path $f)) { throw "missing $f" }
+          $mb = [math]::Round((Get-Item $f).Length / 1MB, 1)
+          Write-Output "installer: $mb MB"
+          if ($mb -lt 3) { throw "installer suspiciously small: $mb MB" }
+
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type != 'tag'
+        continue-on-error: true
+        with:
+          name: Facet-release
+          path: |
+            installer/Facet-setup.exe
+            installer/Facet.exe
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Facet ${{ steps.ver.outputs.version }}
+          make_latest: true
+          files: |
+            installer/Facet-setup.exe
+            installer/Facet.exe
+          body: |
+            **Windows 10/11, 64-bit.**
+            - **`Facet.exe`**: одиночный переносной exe-файл без установки и архивов.
+            - **`Facet-setup.exe`**: классический установщик в профиль пользователя (без прав администратора).
+
+            Python и все библиотеки уже внутри, ставить отдельно ничего не нужно.
+            При первом запуске Windows может показать синий экран «Windows защитила ваш компьютер» — это ожидаемо для программ без платной цифровой подписи: нажмите **Подробнее** → **Выполнить в любом случае**.
+
+      - name: Remove previous releases
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+          }
+          $api = "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100"
+          $rels = Invoke-RestMethod -Uri $api -Headers $headers -Method Get
+          foreach ($r in $rels) {
+            if ($r.tag_name -ne '${{ github.ref_name }}') {
+              Write-Output "Deleting old release id=$($r.id) tag=$($r.tag_name)"
+              Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases/$($r.id)" -Headers $headers -Method Delete
+            }
+          }
