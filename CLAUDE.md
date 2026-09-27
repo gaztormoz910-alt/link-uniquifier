@@ -1,4 +1,4 @@
-# Контекст проекта Link Uniquifier
+# Контекст проекта Link Uniquifier (Facet)
 
 ## Описание проекта
 Тотальная уникализация ссылок для email-рассылок. Из одной ссылки делает сотни уникальных с рандом-хвостами, обёртками через Google-домены, и множеством техник рандомизации.
@@ -56,7 +56,7 @@ soft, medium, aggressive, brand, stealth, paranoid
 6. **parse_qsl вместо parse_qs** — сохраняет оригинальное кодирование параметров
 7. **Windows: UTF-8 wrapping** для stdout/stderr (cp1252 по умолчанию)
 8. **RNG — некриптографический `random.Random()` (Mersenne), НЕ `secrets.SystemRandom`**. Крипто-стойкость для уникализации не нужна, а `SystemRandom`+`secrets.token_hex` дёргали `os.urandom` на каждую операцию и были главным тормозом (профиль: 2.8M вызовов `nt.urandom` на 2000 ссылок). Быстрый hex — helper `_htok(nbytes)` (одно `getrandbits`, ровно 2n hex-символов). Замер: 150 параметров/2 слоя 594→1388 ссылок/с (×2.3), дефолт 4340→6834/с (×1.6). Гейт G30. Скорость/память ∝ (число параметров × число ссылок): при 150 параметрах ссылка ~2475 симв. и 50k = ~125 МБ (2M было бы ~5 ГБ)
-9. **Без метаданных.** В проекте нет личных данных, путей машины, имён аккаунтов, следов инструментов и дат работы. Подпись коммитов в этом репозитории — нейтральная (`git config --local`). Служебные каталоги инструментов игнорируются через `.git/info/exclude`, а не через `.gitignore`. `__pycache__` не хранить (в .pyc вшит абсолютный путь)
+9. **Без метаданных.** В проекте нет личных данных, путей машины, имён аккаунтов, следов инструментов и дат работы. У `Facet.exe` нет ресурса версии (в `Facet.spec` нет `version=`), у установщика не заданы издатель/копирайт/URL. Подпись коммитов в этом репозитории — нейтральная (`git config --local`). Служебные каталоги инструментов игнорируются через `.git/info/exclude`, а не через `.gitignore`. `__pycache__` не хранить (в .pyc вшит абсолютный путь)
 
 ## Отвергнутые обёртки (НЕ работают, НЕ добавлять):
 
@@ -152,3 +152,14 @@ soft, medium, aggressive, brand, stealth, paranoid
 python gui.py      # GUI
 python main.py     # CLI примеры
 ```
+
+## Сборка и релиз (Windows-установщик «Facet»)
+Проект пакуется в `Facet-setup.exe` (без Python у пользователя). Имя продукта — **Facet** (заголовок окна `Facet <версия>`, вордмарк «FACET»).
+- **Иконка**: мастер `assets/Facet.png` → `assets/Facet.ico` (10 размеров 16..256) через `tools/make_icon.py` (уменьшение в ЛИНЕЙНОМ свете + резкость с возвратом энергии). В окно ставится по нативным размерам через WinAPI (`_apply_native_icons`), классу окна (`iconbitmap(default=)`), плюс `SetCurrentProcessExplicitAppUserModelID("Facet.App")`. PNG-мастер и кадры .ico — только критичные чанки (IHDR/IDAT/IEND), без текстовых/EXIF-блоков.
+- **Версия — один источник**: файл `VERSION`; `tools/set_version.py X.Y.Z` пишет его; читают все — окно (`app_version()`), `.iss`, CI. Ресурса версии у `.exe` НЕТ намеренно (свойства файла — метаданные). `resource_path()` — доступ к ресурсам и из исходников, и из `sys._MEIPASS`.
+- **Сборка**: `Facet.spec` (PyInstaller onedir, `collect_all('customtkinter')`, `numpy` в excludes — приложение его не использует, без `version=`). `requirements.txt` = customtkinter + **Pillow** (customtkinter импортирует PIL, но НЕ объявляет его в зависимостях). `freeze_support()` первым в `__main__` — критично для multiprocessing в frozen-exe.
+- **Установщик**: `Facet.iss` (Inno Setup) — в `{localappdata}\Programs\Facet`, `PrivilegesRequired=lowest` (без UAC), `OutputBaseFilename=Facet-setup` (БЕЗ версии — иначе постоянная ссылка ломается). AppId фиксирован. Издатель/копирайт/URL не задаются.
+- **CI**: `.github/workflows/release.yml` — на тег `v*` собирает exe, гоняет смоук (`--selftest`: in-proc + multiprocessing, и запуск окна), собирает установщик, публикует релиз. Выпуск новой версии: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+- **Постоянная ссылка**: `<репозиторий на GitHub>/releases/latest/download/Facet-setup.exe`.
+- **Проверки** (`tools/verify_icon.py`, `verify_version.py`): кадры .ico = мастер (+ негативный контроль); версия сходится (VERSION == окно), ресурса версии у exe нет (+ негативный контроль детектора).
+- **Режим `--selftest <лог>`**: headless-прогон генерации (окна нет, `console=False` → пишет в файл), код 0/1.

@@ -18,6 +18,8 @@ LINK UNIQUIFIER — GUI (тёмная тема «slate», прокручивае
 Запуск:  python gui.py
 """
 
+import os
+import sys
 import time
 import queue
 import multiprocessing as mp
@@ -177,6 +179,27 @@ def page_bounds(total: int, page_size: int, page: int):
 #  ПРИЛОЖЕНИЕ
 # ═══════════════════════════════════════════════════════════
 
+APP_NAME = "Facet"
+APP_ID = "Facet.App"        # AppUserModelID: своя иконка на панели задач, не python.exe
+
+
+def resource_path(rel: str) -> str:
+    """Путь к ресурсу и из исходников, и из собранного .exe. В сборке PyInstaller
+    ресурсы лежат во временной папке распаковки sys._MEIPASS, текущего каталога там
+    нет — поэтому относительные пути ломаются, а этот — нет."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, rel)
+
+
+def app_version() -> str:
+    """Версия из ЕДИНОГО источника — файла VERSION (кладётся в сборку через datas)."""
+    try:
+        with open(resource_path("VERSION"), encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return "0.0"
+
+
 class LinkUniquifierApp(ctk.CTk):
     """Главное окно."""
 
@@ -186,7 +209,17 @@ class LinkUniquifierApp(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
-        self.title("LINK UNIQUIFIER")
+        self.title(f"{APP_NAME}  {app_version()}")
+        # Иконка окна: 1) классу окна (наследуют панель задач и диалоги),
+        # 2) через WinAPI по нативным размерам (иначе заголовку при 150% достаётся
+        #    48×48 вместо 24×24 и получается мыло — см. _apply_native_icons).
+        _ico = resource_path(os.path.join("assets", f"{APP_NAME}.ico"))
+        try:
+            if os.path.isfile(_ico):
+                self.iconbitmap(default=_ico)
+        except Exception:
+            pass
+        self.after(0, lambda: self._apply_native_icons(_ico))
         # Дефолт комфортный, minsize маленький — на меньших окнах страница
         # ПРОКРУЧИВАЕТСЯ, а не ужимается.
         self.geometry("1180x860")
@@ -214,6 +247,36 @@ class LinkUniquifierApp(ctk.CTk):
         self.bind_all("<Control-KeyPress>", self._on_ctrl_key, add="+")
         self.bind_all("<Button-1>", self._on_global_click, add="+")
         self._update_strength()
+
+    def _apply_native_icons(self, ico_path):
+        """Ставит иконку окна по НАТИВНЫМ размерам через WinAPI. iconbitmap() грузит
+        из .ico один кадр (48×48) и отдаёт его и в ICON_BIG, и в ICON_SMALL, из-за
+        чего заголовок при масштабе 150% получает 48→24 мыло. Здесь просим у системы
+        именно SM_CXSMICON и SM_CXICON и грузим нужные кадры. Всё в try/except —
+        отсутствие иконки или не-Windows не должны ронять окно."""
+        try:
+            if sys.platform != "win32" or not os.path.isfile(ico_path) or not self.winfo_exists():
+                return
+            import ctypes
+            u = ctypes.windll.user32
+            u.LoadImageW.restype = ctypes.c_void_p
+            u.SendMessageW.restype = ctypes.c_void_p
+            u.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                       ctypes.c_void_p, ctypes.c_void_p]
+            LR_LOADFROMFILE, IMAGE_ICON, WM_SETICON = 0x0010, 1, 0x0080
+            ICON_SMALL, ICON_BIG = 0, 1
+            SM_CXSMICON, SM_CXICON = 49, 11
+            hwnd = ctypes.c_void_p(u.GetParent(self.winfo_id()) or self.winfo_id())
+            self._icon_handles = getattr(self, "_icon_handles", [])
+            for which, metric in ((ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)):
+                px = u.GetSystemMetrics(metric)
+                h = u.LoadImageW(None, ico_path, IMAGE_ICON, px, px, LR_LOADFROMFILE)
+                if h:
+                    # хендл держим у себя: если иконку соберёт GC — окно останется без неё
+                    self._icon_handles.append(h)
+                    u.SendMessageW(hwnd, WM_SETICON, ctypes.c_void_p(which), ctypes.c_void_p(h))
+        except Exception:
+            pass
 
     def report_callback_exception(self, exc, val, tb):
         """Ctrl+C (KeyboardInterrupt) может прилететь ВНУТРЬ after-колбэка Tk — напр.
@@ -271,10 +334,8 @@ class LinkUniquifierApp(ctk.CTk):
         wm.pack(side="left", padx=(13, 0))
         wmrow = ctk.CTkFrame(wm, fg_color="transparent")
         wmrow.pack(anchor="w")
-        ctk.CTkLabel(wmrow, text="LINK", font=(FONT_FAMILY, 17, "bold"),
+        ctk.CTkLabel(wmrow, text="FACET", font=(FONT_FAMILY, 18, "bold"),
                      text_color=COLOR_ACCENT).pack(side="left")
-        ctk.CTkLabel(wmrow, text=" UNIQUIFIER", font=(FONT_FAMILY, 17, "bold"),
-                     text_color=COLOR_TEXT).pack(side="left")
         ctk.CTkLabel(wm, text="уникализатор ссылок для рассылок",
                      font=(FONT_MONO, 10), text_color=COLOR_TEXT_DIM2,
                      anchor="w").pack(anchor="w", pady=(1, 0))
@@ -1044,8 +1105,68 @@ def main(app_factory=LinkUniquifierApp) -> None:
             pass
 
 
+def _selftest(log_path: str) -> int:
+    """Прогон ОСНОВНОГО сценария (генерация уникальных ссылок) на укороченных данных,
+    без окна — smoke для собранного .exe. Проверяет и путь в этом же процессе, и
+    МНОГОПРОЦЕССНЫЙ путь (критично для .exe: freeze_support/spawn). console=False →
+    stdout=None, поэтому пишем результат в файл. Код возврата 0/1."""
+    lines = []
+    try:
+        import main as _m
+        seen = set()
+        for _ in range(300):
+            u = _m.uniquify_url("https://example.com/offer", "ready",
+                                params_count_range=(5, 12), use_wrapper=True, wrapper_layers=2)
+            seen.add(u)
+        assert len(seen) == 300, f"inproc unique={len(seen)}"
+        lines.append(f"inproc_ok={len(seen)}")
+
+        qn, ev = mp.Queue(), mp.Event()
+        p = mp.Process(target=_m.generate_worker,
+                       args=("https://example.com/offer",
+                             dict(params_count_range=(5, 12), use_wrapper=True, wrapper_layers=2),
+                             200, qn, ev), daemon=True)
+        p.start()
+        got, t0 = [], time.perf_counter()
+        while time.perf_counter() - t0 < 40:
+            try:
+                item = qn.get(timeout=1)
+            except queue.Empty:
+                if not p.is_alive():
+                    break
+                continue
+            if isinstance(item, tuple):          # ("__done__", attempts)
+                break
+            got.extend(item)
+        ev.set(); p.join(timeout=5)
+        if p.is_alive():
+            p.terminate()
+        assert len(got) >= 100, f"mp got={len(got)}"
+        lines.append(f"mp_ok={len(got)}")
+        msg, code = "SELFTEST_OK " + " ".join(lines) + f" version={app_version()}", 0
+    except Exception as e:
+        msg, code = "SELFTEST_FAIL " + " ".join(lines) + f" err={type(e).__name__}:{e}", 1
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+    return code
+
+
 if __name__ == "__main__":
-    # freeze_support — чтобы дочерний процесс генерации корректно поднимался при
-    # spawn на Windows (и в замороженном .exe), а не пытался заново открыть окно.
+    # freeze_support ПЕРВЫМ — дочерний процесс генерации при spawn/в .exe не должен
+    # заново открывать окно.
     mp.freeze_support()
+    # AppUserModelID ДО окна — иначе на панели задач иконка python.exe.
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+    except Exception:
+        pass
+    if "--selftest" in sys.argv:
+        _i = sys.argv.index("--selftest")
+        _log = sys.argv[_i + 1] if _i + 1 < len(sys.argv) else "selftest.log"
+        sys.exit(_selftest(_log))
     main()

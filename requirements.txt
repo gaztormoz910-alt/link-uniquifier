@@ -1,1 +1,7 @@
-customtkinter
+# Рантайм-зависимости приложения (всё, что реально импортируется).
+# customtkinter при импорте тянет PIL, но САМ Pillow в его Requires не указан
+# (Requires: darkdetect, packaging) — поэтому Pillow перечисляем явно, иначе на
+# чистом сервере сборка/запуск падают на `import PIL`. darkdetect и packaging
+# ставятся как объявленные зависимости customtkinter.
+customtkinter==5.2.2
+Pillow>=10.0

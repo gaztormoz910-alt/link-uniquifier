@@ -4,8 +4,11 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+
+# артефакты сборки установщика (собираются локально/в CI, не в репозиторий)
 build/
 dist/
+installer/
 
 # ОС
 Thumbs.db
