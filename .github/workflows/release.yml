@@ -37,6 +37,12 @@ jobs:
       - name: Собрать .exe
         run: python -m PyInstaller --noconfirm --clean --log-level WARN Facet.spec
 
+      - name: Вычистить метаданные сборки
+        # ДО смоука: PE-таймстемпы и времена файлов выдают момент и машину сборки.
+        # selftest ниже идёт уже по вычищенному exe — заодно доказывает, что правка
+        # PE-заголовка не сломала запуск.
+        run: python tools/scrub_metadata.py dist/Facet
+
       - name: Смоук — selftest собранного exe (основной путь + multiprocessing)
         shell: pwsh
         run: |
@@ -75,6 +81,19 @@ jobs:
           if (-not (Test-Path $iscc)) { throw "ISCC.exe не найден" }
           & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" Facet.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - name: Вычистить метаданные установщика
+        # Полезную нагрузку (dist) чистили до упаковки, так что внутри уже чисто;
+        # здесь нормализуем таймстемп PE самого setup.exe.
+        run: python tools/scrub_metadata.py --file installer/Facet-setup.exe
+
+      - name: Проверить, что метаданных сборки не осталось
+        shell: pwsh
+        run: |
+          python tools/scrub_metadata.py --verify dist/Facet
+          if ($LASTEXITCODE -ne 0) { throw "в dist остались метаданные сборки" }
+          python tools/scrub_metadata.py --verify --file installer/Facet-setup.exe
+          if ($LASTEXITCODE -ne 0) { throw "в установщике остался таймстемп PE" }
 
       - name: Проверить установщик
         shell: pwsh
