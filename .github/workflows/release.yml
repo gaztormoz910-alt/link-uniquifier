@@ -73,29 +73,57 @@ jobs:
       - name: Собрать установщик
         shell: pwsh
         run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            # Inno Setup переехал на GitHub-релизы; старый choco-пакет тянет бинарь
-            # по сменившемуся адресу и падает на проверке хеша (из-за этого сборка
-            # и ломалась). Ставим официальный инсталлятор напрямую с ЗАКРЕПЛЁННОГО
-            # релиза и сверяем SHA256 — URL неизменяемый, не протухнет как choco-пакет.
+          $ErrorActionPreference = "Stop"
+          # ISCC может оказаться в разных местах в зависимости от того, как встал
+          # Inno (all-users в Program Files или per-user в LocalAppData/свой каталог).
+          # Ищем во всех кандидатах, а не только в Program Files (x86) — из-за этого
+          # фикс v1.0.3 и не нашёл ISCC после установки.
+          function Find-ISCC {
+            foreach ($c in @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+              "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+              "$env:RUNNER_TEMP\InnoSetup6\ISCC.exe")) {
+              if (Test-Path $c) { return $c }
+            }
+            return $null
+          }
+          $iscc = Find-ISCC
+          if (-not $iscc) {
+            # Inno переехал на GitHub-релизы; choco-пакет протух по хешу и ломал шаг.
+            # Ставим официальный инсталлятор напрямую, per-user и в СВОЙ каталог —
+            # не зависим от прав и от того, куда он встал бы по умолчанию.
             $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
             $sha = "9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732"
             $exe = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3.exe"
+            $dir = Join-Path $env:RUNNER_TEMP "InnoSetup6"
+            Write-Output "Качаю Inno Setup: $url"
             Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
+            Write-Output ("Скачано: {0:N1} MB" -f ((Get-Item $exe).Length / 1MB))
             $got = (Get-FileHash $exe -Algorithm SHA256).Hash
             if ($got -ne $sha) { throw "SHA256 инсталлятора Inno не совпал: $got" }
-            Start-Process -FilePath $exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-","/NOICONS" -Wait
-            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList `
+              "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-","/NOICONS","/CURRENTUSER","/DIR=$dir"
+            Write-Output "Инсталлятор Inno завершился с кодом $($p.ExitCode)"
+            $iscc = Find-ISCC
           }
-          if (-not (Test-Path $iscc)) {
-            # Запасной путь, если прямая загрузка недоступна.
+          if (-not $iscc) {
+            Write-Output "Прямая установка не дала ISCC — пробую choco"
             choco install innosetup -y --no-progress --ignore-checksums
-            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            $iscc = Find-ISCC
           }
-          if (-not (Test-Path $iscc)) { throw "ISCC.exe не найден после установки Inno Setup" }
+          if (-not $iscc) {
+            Write-Output "=== ISCC не найден. Содержимое кандидатов: ==="
+            foreach ($d in @("${env:ProgramFiles(x86)}\Inno Setup 6","$env:ProgramFiles\Inno Setup 6","$env:LOCALAPPDATA\Programs\Inno Setup 6","$env:RUNNER_TEMP\InnoSetup6")) {
+              Write-Output "--- $d ---"
+              if (Test-Path $d) { Get-ChildItem -Recurse $d -ErrorAction SilentlyContinue | Select-Object -First 20 -ExpandProperty FullName }
+              else { Write-Output "(каталога нет)" }
+            }
+            throw "ISCC.exe не найден после установки Inno Setup"
+          }
+          Write-Output "Использую ISCC: $iscc"
           & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" Facet.iss
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed (код $LASTEXITCODE)" }
 
       - name: Вычистить метаданные установщика
         # Полезную нагрузку (dist) чистили до упаковки, так что внутри уже чисто;
