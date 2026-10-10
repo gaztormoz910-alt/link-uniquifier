@@ -147,7 +147,13 @@ jobs:
           Write-Output "installer: $mb MB"
           if ($mb -lt 3) { throw "установщик подозрительно мал: $mb MB" }
 
+      # Артефакт нужен только для ручных (не-тег) прогонов — чтобы скачать установщик
+      # без релиза. На тег публикуется релиз (его ассет в квоту артефактов НЕ входит),
+      # поэтому артефакт тут лишний. continue-on-error: нехватка квоты артефактов
+      # НЕ должна рушить job и мешать публикации релиза (из-за этого падал v1.0.4).
       - uses: actions/upload-artifact@v4
+        if: github.ref_type != 'tag'
+        continue-on-error: true
         with:
           name: Facet-setup
           path: installer/Facet-setup.exe
