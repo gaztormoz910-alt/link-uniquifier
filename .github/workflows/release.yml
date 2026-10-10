@@ -75,10 +75,25 @@ jobs:
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) {
-            choco install innosetup -y --no-progress
+            # Inno Setup переехал на GitHub-релизы; старый choco-пакет тянет бинарь
+            # по сменившемуся адресу и падает на проверке хеша (из-за этого сборка
+            # и ломалась). Ставим официальный инсталлятор напрямую с ЗАКРЕПЛЁННОГО
+            # релиза и сверяем SHA256 — URL неизменяемый, не протухнет как choco-пакет.
+            $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+            $sha = "9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732"
+            $exe = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3.exe"
+            Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
+            $got = (Get-FileHash $exe -Algorithm SHA256).Hash
+            if ($got -ne $sha) { throw "SHA256 инсталлятора Inno не совпал: $got" }
+            Start-Process -FilePath $exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-","/NOICONS" -Wait
             $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           }
-          if (-not (Test-Path $iscc)) { throw "ISCC.exe не найден" }
+          if (-not (Test-Path $iscc)) {
+            # Запасной путь, если прямая загрузка недоступна.
+            choco install innosetup -y --no-progress --ignore-checksums
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe не найден после установки Inno Setup" }
           & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" Facet.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
