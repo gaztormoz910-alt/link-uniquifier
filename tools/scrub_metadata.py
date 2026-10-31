@@ -100,8 +100,20 @@ def pe_stamp_values(path):
     return vals, cs_ok
 
 
-# ── файловые времена ────────────────────────────────────────────────────
+# ── файловые времена и ADS ──────────────────────────────────────────────
+def remove_ads(path):
+    """Снимает альтернативный поток Zone.Identifier (Mark of the Web) на Windows."""
+    if os.name == "nt":
+        zone = f"{path}:Zone.Identifier"
+        if os.path.exists(zone):
+            try:
+                os.remove(zone)
+            except Exception:
+                pass
+
+
 def set_file_times(path):
+    remove_ads(path)
     os.utime(path, (EPOCH, EPOCH))
     if os.name == "nt":
         _win_set_create_time(path, EPOCH)
